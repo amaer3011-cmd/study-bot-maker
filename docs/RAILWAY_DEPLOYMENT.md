@@ -8,9 +8,9 @@
 
 اربط مستودع GitHub بالمشروع وأنشئ Service واحدة من مجلد المشروع. يجب أن يكون الملف `Dockerfile` موجودًا في جذر المستودع وبالاسم نفسه مع حرف D كبير؛ Railway يبحث عن هذا الاسم تلقائيًا.
 
-المشروع يحتوي على `railway.json` للتوافق مع خدمات Railway التي ما زالت تستخدم Config as Code القديم. توثيق Railway الحالي يوصي بـInfrastructure as Code عبر `.railway/railway.ts` أو `.railway/railway.py` للمشاريع الجديدة، لذلك اضبط Start Command وHealthcheck يدويًا من إعدادات الخدمة إن لم يقرأ Railway `railway.json`.
+المشروع يحتوي على `railway.json` للتوافق مع خدمات Railway التي ما زالت تستخدم Config as Code القديم. توثيق Railway الحالي يوصي بـInfrastructure as Code عبر `.railway/railway.ts` أو `.railway/railway.py` للمشاريع الجديدة، لذلك اضبط Healthcheck يدويًا من إعدادات الخدمة إن لم يقرأ Railway `railway.json`.
 
-أمر التشغيل هو:
+عند البناء من `Dockerfile` اترك **Start Command** فارغًا. يستخدم Railway عندها `ENTRYPOINT` و`CMD` الموجودين في الصورة؛ يبدأ `entrypoint.sh` بصلاحيات root لتهيئة `/app/data` ثم يشغّل التطبيق بالمستخدم غير الجذري `app`. تعيين `python main.py` كـStart Command قد يتجاوز هذه التهيئة. الأمر التالي للتشغيل المحلي خارج Railway فقط:
 
 ```bash
 python main.py
@@ -75,4 +75,4 @@ MOTIVATION_VIDEOS_ENABLED=true
 
 لا تُرسل ملفات `study_bot.sqlite3-wal` أو `study_bot.sqlite3-shm` وحدها كنسخة احتياطية؛ يجب أن تكون مرتبطة بملف قاعدة البيانات الرئيسي، أو استخدم Backup صحيحًا عبر SQLite.
 
-هذا المشروع لا يشغّل كودًا مرفوعًا من المستخدمين. إذا أُضيفت هذه الوظيفة، يجب فصل Executor عن الخدمة وعدم استخدام `docker.sock` أو `privileged: true`.
+بعد إضافة فيديوهات خارجية، راجع `docs/ADDING_MEDIA.md` وتأكد من وجود صفحة مصدر وترخيص لكل مقطع في manifest. هذا المشروع لا يشغّل كودًا مرفوعًا من المستخدمين. إذا أُضيفت هذه الوظيفة، يجب فصل Executor عن الخدمة وعدم استخدام `docker.sock` أو `privileged: true`.

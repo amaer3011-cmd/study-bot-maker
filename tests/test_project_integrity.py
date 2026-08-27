@@ -64,6 +64,23 @@ def test_motivation_video_library_is_present() -> None:
     assert not missing, f"Missing motivation videos: {missing[:5]}"
 
 
+def test_motivation_manifest_records_are_unique_and_traceable() -> None:
+    import json
+
+    manifest = ROOT / "assets" / "motivation_videos_manifest.json"
+    records = json.loads(manifest.read_text(encoding="utf-8"))
+    assets = [record["asset"] for record in records]
+    hashes = [record["sha256"] for record in records]
+    assert len(assets) == len(set(assets))
+    assert len(hashes) == len(set(hashes))
+    for record in records:
+        assert (ROOT / record["asset"]).is_file()
+        assert record["video_codec"] == "h264"
+    external = [record for record in records if record.get("source_type") == "Mixkit stock video"]
+    assert len(external) >= 5
+    assert all(record.get("source_url") and record.get("license_url") for record in external)
+
+
 def test_motivation_video_send_and_media_cache(tmp_path: Path) -> None:
     from config import Settings
     from main import StudyBot
