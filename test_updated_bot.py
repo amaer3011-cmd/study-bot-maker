@@ -71,7 +71,7 @@ def strip_diacritics(value):
 
 assert all(any(keyword in strip_diacritics(dua) for keyword in ('علم', 'مذاكر', 'دراس', 'فهم', 'حفظ', 'راجع', 'تركيز', 'مهم', 'مهام', 'وقت', 'نجاح', 'إنجاز', 'درس', 'معلوم', 'ذاكر', 'اختبار', 'جلس', 'تعلم', 'خط')) for dua in STUDY_DUAS)
 assert sum(1 for path in available_images if path.name.startswith('user_')) == 106
-assert len(available_motivation_videos()) == 14
+assert len(available_motivation_videos()) >= 19
 random_images = [str(bot._random_template_image(321)) for _ in range(12)]
 assert len(set(random_images)) >= 2
 assert all(random_images[i] != random_images[i - 1] for i in range(1, len(random_images)))

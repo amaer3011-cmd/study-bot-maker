@@ -19,6 +19,8 @@ class Store:
         self.path = Path(path)
         self.lock = RLock()
         self.memory: dict[int, dict] = {}
+        self.memory_users: dict[int, dict] = {}
+        self.memory_events: list[dict] = []
         self.connection: sqlite3.Connection | None = None
         self.sqlite_failure_count = 0
         self.last_sqlite_failure_at: str | None = None
@@ -125,6 +127,7 @@ class Store:
         # cost to every history insert. Keep only the matching id-based index.
         self.connection.execute("DROP INDEX IF EXISTS idx_history_chat")
         self.connection.execute("CREATE INDEX IF NOT EXISTS idx_users_last_seen ON bot_users(last_seen_at DESC)")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS idx_users_created ON bot_users(created_at DESC)")
         self.connection.execute("CREATE INDEX IF NOT EXISTS idx_users_blocked ON bot_users(is_blocked)")
         self.connection.execute("CREATE INDEX IF NOT EXISTS idx_events_created ON bot_events(created_at DESC)")
 
@@ -313,12 +316,31 @@ class Store:
         username: str = "",
         first_name: str = "",
         last_name: str = "",
-    ) -> None:
-        if not self.connection:
-            return
+    ) -> bool:
+        """Register a chat and return True only the first time it is seen."""
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        normalized = {
+            "chat_id": int(chat_id),
+            "user_id": int(user_id),
+            "username": username or "",
+            "first_name": first_name or "",
+            "last_name": last_name or "",
+            "is_blocked": 0,
+            "created_at": now,
+            "last_seen_at": now,
+        }
+        if not self.connection:
+            previous = self.memory_users.get(chat_id)
+            if previous:
+                normalized["created_at"] = previous["created_at"]
+                normalized["is_blocked"] = previous.get("is_blocked", 0)
+            self.memory_users[chat_id] = normalized
+            return previous is None
         try:
             with self.lock:
+                existing = self.connection.execute(
+                    "SELECT 1 FROM bot_users WHERE chat_id=?", (chat_id,)
+                ).fetchone()
                 self.connection.execute(
                     """INSERT INTO bot_users(chat_id, user_id, username, first_name, last_name, created_at, last_seen_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -327,12 +349,14 @@ class Store:
                     last_name=excluded.last_name, last_seen_at=excluded.last_seen_at""",
                     (chat_id, user_id, username or "", first_name or "", last_name or "", now, now),
                 )
+            return existing is None
         except Exception:
             logger.debug("Could not register user %s", chat_id, exc_info=True)
+            return False
 
     def is_blocked(self, chat_id: int) -> bool:
         if not self.connection:
-            return False
+            return bool(self.memory_users.get(chat_id, {}).get("is_blocked", 0))
         try:
             with self.lock:
                 row = self.connection.execute("SELECT is_blocked FROM bot_users WHERE chat_id=?", (chat_id,)).fetchone()
@@ -343,6 +367,15 @@ class Store:
 
     def set_blocked(self, chat_id: int, blocked: bool) -> None:
         if not self.connection:
+            user = self.memory_users.setdefault(
+                chat_id,
+                {
+                    "chat_id": chat_id, "user_id": chat_id, "username": "", "first_name": "", "last_name": "",
+                    "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "last_seen_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                },
+            )
+            user["is_blocked"] = 1 if blocked else 0
             return
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         try:
@@ -357,7 +390,9 @@ class Store:
 
     def user_count(self, blocked: bool | None = None) -> int:
         if not self.connection:
-            return len(self.memory)
+            if blocked is None:
+                return len(self.memory_users)
+            return sum(1 for user in self.memory_users.values() if bool(user.get("is_blocked")) == blocked)
         try:
             with self.lock:
                 if blocked is None:
@@ -369,10 +404,11 @@ class Store:
             return 0
 
     def list_users(self, limit: int = 30, offset: int = 0) -> list[dict]:
-        if not self.connection:
-            return []
         limit = max(1, min(int(limit), 100))
         offset = max(0, int(offset))
+        if not self.connection:
+            users = sorted(self.memory_users.values(), key=lambda item: item.get("last_seen_at", ""), reverse=True)
+            return [dict(user) for user in users[offset:offset + limit]]
         try:
             with self.lock:
                 rows = self.connection.execute(
@@ -386,9 +422,113 @@ class Store:
             logger.exception("Could not list users")
             return []
 
+    def new_users(self, hours: int = 24, limit: int = 30) -> list[dict]:
+        hours = max(1, min(int(hours), 24 * 30))
+        limit = max(1, min(int(limit), 100))
+        if not self.connection:
+            cutoff = datetime.now(timezone.utc).timestamp() - hours * 3600
+            users = [
+                user for user in self.memory_users.values()
+                if datetime.fromisoformat(user["created_at"]).timestamp() >= cutoff
+            ]
+            users.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+            return [dict(user) for user in users[:limit]]
+        cutoff = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() - hours * 3600, timezone.utc).isoformat(timespec="seconds")
+        try:
+            with self.lock:
+                rows = self.connection.execute(
+                    "SELECT chat_id, user_id, username, first_name, last_name, is_blocked, created_at, last_seen_at "
+                    "FROM bot_users WHERE created_at>=? ORDER BY created_at DESC LIMIT ?",
+                    (cutoff, limit),
+                ).fetchall()
+            keys = ["chat_id", "user_id", "username", "first_name", "last_name", "is_blocked", "created_at", "last_seen_at"]
+            return [dict(zip(keys, row)) for row in rows]
+        except Exception:
+            logger.exception("Could not list new users")
+            return []
+
+    def count_users_since(self, hours: int = 24, field: str = "last_seen_at") -> int:
+        hours = max(1, min(int(hours), 24 * 30))
+        if field not in {"created_at", "last_seen_at"}:
+            raise ValueError("field must be created_at or last_seen_at")
+        if not self.connection:
+            cutoff = datetime.now(timezone.utc).timestamp() - hours * 3600
+            return sum(
+                1 for user in self.memory_users.values()
+                if datetime.fromisoformat(user[field]).timestamp() >= cutoff
+            )
+        cutoff = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() - hours * 3600, timezone.utc).isoformat(timespec="seconds")
+        try:
+            with self.lock:
+                row = self.connection.execute(f"SELECT COUNT(*) FROM bot_users WHERE {field}>=?", (cutoff,)).fetchone()
+            return int(row[0] if row else 0)
+        except Exception:
+            return 0
+
+    def active_session_count(self) -> int:
+        now_ms = cairo_now().timestamp() * 1000
+        if not self.connection:
+            return sum(
+                1 for session in self.memory.values()
+                if session.get("step") not in {"idle", "done"}
+                or (session.get("step") == "done" and session.get("reminder_ends_at", 0) > now_ms)
+            )
+        try:
+            with self.lock:
+                row = self.connection.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE step NOT IN ('idle','done') OR (step='done' AND reminder_ends_at>?)",
+                    (now_ms,),
+                ).fetchone()
+            return int(row[0] if row else 0)
+        except Exception:
+            return 0
+
+    def recent_events_for_chat(self, chat_id: int, limit: int = 10) -> list[dict]:
+        limit = max(1, min(int(limit), 50))
+        if not self.connection:
+            return [dict(event) for event in reversed(self.memory_events) if event["chat_id"] == chat_id][:limit]
+        try:
+            with self.lock:
+                rows = self.connection.execute(
+                    "SELECT chat_id, event_type, details, created_at FROM bot_events WHERE chat_id=? ORDER BY id DESC LIMIT ?",
+                    (chat_id, limit),
+                ).fetchall()
+            keys = ["chat_id", "event_type", "details", "created_at"]
+            return [dict(zip(keys, row)) for row in rows]
+        except Exception:
+            logger.exception("Could not read events for chat %s", chat_id)
+            return []
+
+    def user_profile(self, chat_id: int) -> dict | None:
+        if not self.connection:
+            user = self.memory_users.get(chat_id)
+            if not user:
+                return None
+            result = dict(user)
+            session = self.memory.get(chat_id, self.fresh())
+            result.update({"current_step": session.get("step", "idle"), "total_sessions": session.get("total_sessions", 0), "total_minutes": session.get("total_minutes", 0), "history_count": 0, "event_count": 0})
+            return result
+        try:
+            with self.lock:
+                row = self.connection.execute(
+                    "SELECT u.chat_id, u.user_id, u.username, u.first_name, u.last_name, u.is_blocked, u.created_at, u.last_seen_at, "
+                    "COALESCE(s.step, 'idle'), COALESCE(s.total_sessions, 0), COALESCE(s.total_minutes, 0), "
+                    "(SELECT COUNT(*) FROM study_history h WHERE h.chat_id=u.chat_id), "
+                    "(SELECT COUNT(*) FROM bot_events e WHERE e.chat_id=u.chat_id) "
+                    "FROM bot_users u LEFT JOIN sessions s ON s.chat_id=u.chat_id WHERE u.chat_id=?",
+                    (chat_id,),
+                ).fetchone()
+            if not row:
+                return None
+            keys = ["chat_id", "user_id", "username", "first_name", "last_name", "is_blocked", "created_at", "last_seen_at", "current_step", "total_sessions", "total_minutes", "history_count", "event_count"]
+            return dict(zip(keys, row))
+        except Exception:
+            logger.exception("Could not read user profile for %s", chat_id)
+            return None
+
     def broadcast_targets(self) -> list[int]:
         if not self.connection:
-            return list(self.memory)
+            return [int(chat_id) for chat_id, user in self.memory_users.items() if not user.get("is_blocked")]
         try:
             with self.lock:
                 rows = self.connection.execute("SELECT chat_id FROM bot_users WHERE is_blocked=0").fetchall()
@@ -397,7 +537,15 @@ class Store:
             return []
 
     def log_event(self, chat_id: int, event_type: str, details: str = "") -> None:
+        event = {
+            "chat_id": int(chat_id),
+            "event_type": event_type[:80],
+            "details": details[:500],
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
         if not self.connection:
+            self.memory_events.append(event)
+            self.memory_events = self.memory_events[-500:]
             return
         try:
             with self.lock:
@@ -409,9 +557,15 @@ class Store:
             logger.debug("Could not log event", exc_info=True)
 
     def recent_events(self, minutes: int = 10, limit: int = 100) -> list[dict]:
-        if not self.connection:
-            return []
         minutes = max(1, min(int(minutes), 1440))
+        limit = max(1, min(int(limit), 200))
+        if not self.connection:
+            cutoff = datetime.now(timezone.utc).timestamp() - minutes * 60
+            return [
+                dict(event)
+                for event in reversed(self.memory_events)
+                if datetime.fromisoformat(event["created_at"]).timestamp() >= cutoff
+            ][:limit]
         limit = max(1, min(int(limit), 200))
         cutoff = (datetime.now(timezone.utc).timestamp() - minutes * 60)
         cutoff_iso = datetime.fromtimestamp(cutoff, timezone.utc).isoformat(timespec="seconds")
@@ -428,7 +582,12 @@ class Store:
 
     def bot_totals(self) -> dict:
         if not self.connection:
-            return {"users": len(self.memory), "blocked": 0, "sessions": 0, "minutes": 0}
+            return {
+                "users": len(self.memory_users),
+                "blocked": sum(1 for user in self.memory_users.values() if user.get("is_blocked")),
+                "sessions": 0,
+                "minutes": 0,
+            }
         try:
             with self.lock:
                 users = self.connection.execute("SELECT COUNT(*) FROM bot_users").fetchone()[0]

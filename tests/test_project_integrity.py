@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -99,6 +100,50 @@ def test_motivation_video_send_and_media_cache(tmp_path: Path) -> None:
     assert len(fake.sent) == 1
     assert fake.sent[0]["caption"]
     assert bot.store.get_media_id(f"motivation_video:{Path(fake.sent[0]['video'].name).name}") == "telegram-video-id"
+    bot.store.close()
+
+
+def test_owner_dashboard_storage_and_session_lock(tmp_path: Path) -> None:
+    from config import Settings
+    from main import StudyBot
+
+    bot = StudyBot(Settings("123456:TEST", 3000, str(tmp_path / "owner.sqlite3"), 20, 180, 720, 0, owner_ids=(999,)))
+    store = bot.store
+    assert store.upsert_user(700, 700, "new_student", "طالب جديد", "") is True
+    assert store.upsert_user(700, 700, "new_student", "طالب جديد", "") is False
+    assert len(store.new_users(24, 10)) == 1
+    store.log_event(700, "study_started", "template=1")
+    profile = store.user_profile(700)
+    assert profile and profile["total_sessions"] == 0
+    assert store.recent_events_for_chat(700, 5)[0]["event_type"] == "study_started"
+    session = store.get(700)
+    session["step"] = "done"
+    session["reminder_ends_at"] = (time.time() + 300) * 1000
+    store.save(700, session)
+    assert store.active_session_count() == 1
+    assert bot.session_lock_message(700) and "جلسة جميلة جارية الآن" in bot.session_lock_message(700)
+    store.close()
+
+
+def test_owner_new_member_notification_and_reports(tmp_path: Path) -> None:
+    from config import Settings
+    from main import StudyBot
+
+    class FakeBot:
+        def __init__(self) -> None:
+            self.messages = []
+
+        async def send_message(self, chat_id, text, **kwargs):
+            self.messages.append((chat_id, text, kwargs))
+
+    bot = StudyBot(Settings("123456:TEST", 3000, str(tmp_path / "notify.sqlite3"), 20, 180, 720, 0, owner_ids=(999,)))
+    fake = FakeBot()
+    asyncio.run(bot.notify_owner_new_user(fake, SimpleNamespace(first_name="سارة", last_name="علي", username="sara"), 700))
+    assert fake.messages and fake.messages[0][0] == 999
+    assert "عضو جديد" in fake.messages[0][1] and "700" in fake.messages[0][1]
+    bot.store.upsert_user(700, 700, "sara", "سارة", "علي")
+    assert "إجمالي المستخدمين" in bot.admin_stats_text()
+    assert "الأعضاء الجدد" in bot.admin_new_users_text()
     bot.store.close()
 
 

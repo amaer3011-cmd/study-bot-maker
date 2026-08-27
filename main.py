@@ -98,6 +98,30 @@ class StudyBot:
             self.chat_locks[chat_id] = lock
         return lock
 
+    def session_lock_message(self, chat_id: int) -> str | None:
+        session = self.store.get(chat_id)
+        step = session.get("step", "idle")
+        if step == "done" and session.get("reminder_ends_at", 0) > time.time() * 1000:
+            remaining = max(0, session["reminder_ends_at"] / 1000 - time.time())
+            return (
+                "⏳ <b>جلسة جميلة جارية الآن</b>\n\n"
+                f"متبقي تقريبًا: <b>{self._format_remaining(remaining)}</b>.\n"
+                "خلّيك مع جلستك الحالية، وبعد ما تخلص هتقدر تبدأ جلسة جديدة بكل هدوء 💛📚"
+            )
+        if step in {"waiting_start_time", "waiting_duration", "waiting_tasks"}:
+            return (
+                "📝 <b>أنت بالفعل تجهّز جلسة مذاكرة</b>\n\n"
+                "كمّل الخطوات الحالية بدل ما نبدأ جلسة ثانية بالخطأ. أنا معك خطوة بخطوة 🤝"
+            )
+        return None
+
+    async def tell_session_is_locked(self, message, chat_id: int) -> bool:
+        notice = self.session_lock_message(chat_id)
+        if not notice:
+            return False
+        await message.reply_text(notice, parse_mode=ParseMode.HTML)
+        return True
+
     async def cleanup_state_loop(self) -> None:
         try:
             while True:
@@ -237,9 +261,11 @@ class StudyBot:
     @lru_cache(maxsize=1)
     def admin_keyboard() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 الإحصائيات", callback_data="admin:stats"), InlineKeyboardButton("👥 الأعضاء", callback_data="admin:users")],
-            [InlineKeyboardButton("🚫 حظر عضو", callback_data="admin:block"), InlineKeyboardButton("✅ فك حظر", callback_data="admin:unblock")],
-            [InlineKeyboardButton("📢 إذاعة رسالة", callback_data="admin:broadcast"), InlineKeyboardButton("🧾 سجلات 10 دقائق", callback_data="admin:logs")],
+            [InlineKeyboardButton("🟢 حالة البوت", callback_data="admin:status"), InlineKeyboardButton("📊 الإحصائيات", callback_data="admin:stats")],
+            [InlineKeyboardButton("👥 كل الأعضاء", callback_data="admin:users"), InlineKeyboardButton("🆕 أعضاء جدد", callback_data="admin:new_users")],
+            [InlineKeyboardButton("🔎 بحث عن عضو", callback_data="admin:lookup"), InlineKeyboardButton("🧾 السجلات", callback_data="admin:logs")],
+            [InlineKeyboardButton("🚫 حظر عضو", callback_data="admin:block"), InlineKeyboardButton("✅ فك الحظر", callback_data="admin:unblock")],
+            [InlineKeyboardButton("📢 إذاعة رسالة", callback_data="admin:broadcast"), InlineKeyboardButton("⏹ إيقاف الإذاعة", callback_data="admin:broadcast_cancel")],
             [InlineKeyboardButton("🔒 الاشتراك الإجباري", callback_data="admin:subscription")],
         ])
 
@@ -281,7 +307,11 @@ class StudyBot:
         message = update.effective_message
         if not user or not chat or not message:
             return False
-        self.store.upsert_user(chat.id, user.id, user.username or "", user.first_name or "", user.last_name or "")
+        is_new_user = self.store.upsert_user(chat.id, user.id, user.username or "", user.first_name or "", user.last_name or "")
+        if is_new_user:
+            details = f"user_id={user.id},username={user.username or ''},name={user.first_name or ''}"
+            self.store.log_event(chat.id, "new_user", details)
+            await self.notify_owner_new_user(context.bot, user, chat.id)
         self.store.log_event(chat.id, "update", (update.callback_query.data if update.callback_query else message.text or "")[:120])
         if self.is_owner(user.id):
             return True
@@ -575,6 +605,8 @@ class StudyBot:
                 if source_chat_id:
                     await self.send_shared_timer_status(update.message, source_chat_id)
                     return
+            if await self.tell_session_is_locked(update.message, chat_id):
+                return
             self.cancel_reminder(chat_id)
             reset_flow(self.store, chat_id)
             self.nav.pop(chat_id, None)
@@ -605,6 +637,8 @@ class StudyBot:
                 return
             chat_id = update.effective_chat.id
             async with self.chat_lock(chat_id):
+                if await self.tell_session_is_locked(update.message, chat_id):
+                    return
                 self.cancel_reminder(chat_id)
                 reset_flow(self.store, chat_id)
                 await self.send_categories(update.message)
@@ -615,10 +649,16 @@ class StudyBot:
                 return
             chat_id = update.effective_chat.id
             async with self.chat_lock(chat_id):
+                was_running = self.store.get(chat_id).get("step") == "done" and self.store.get(chat_id).get("reminder_ends_at", 0) > time.time() * 1000
                 self.cancel_reminder(chat_id)
                 reset_flow(self.store, chat_id)
+                notice = (
+                    "✅ <b>تم إلغاء الجلسة الجارية.</b>\nلن يصلك تذكيرها، ولما تكون جاهزًا نبدأ جلسة جديدة 🤍"
+                    if was_running else
+                    "✅ <b>تم إلغاء التجهيز الحالي.</b>\nخذ وقتك، ولما تكون جاهزًا أرسل /study ونبدأ من جديد 🤍"
+                )
                 await update.message.reply_text(
-                    "✅ <b>تم إلغاء الجلسة.</b>\nأرسل /study للبدء من جديد.",
+                    notice,
                     parse_mode=ParseMode.HTML,
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 جلسة جديدة", callback_data="start")]]),
                 )
@@ -682,6 +722,97 @@ class StudyBot:
     def owner_required(self, update: Update) -> bool:
         return self.is_owner(update.effective_user.id if update.effective_user else None)
 
+    async def notify_owner_new_user(self, bot, user, chat_id: int) -> None:
+        """Notify every other owner once when a chat is first registered."""
+        name = " ".join(part for part in (user.first_name, user.last_name) if part).strip() or "بدون اسم"
+        username = f"@{user.username}" if user.username else "بدون username"
+        text = (
+            "🆕 <b>عضو جديد دخل البوت</b>\n\n"
+            f"👤 الاسم: <b>{html.escape(name[:80])}</b>\n"
+            f"🔗 username: <code>{html.escape(username)}</code>\n"
+            f"🆔 chat_id: <code>{chat_id}</code>\n"
+            f"🕐 الوقت: <code>{html.escape(cairo_now().strftime('%Y-%m-%d %H:%M'))}</code>"
+        )
+        deliveries = [
+            bot.send_message(owner_id, text, parse_mode=ParseMode.HTML)
+            for owner_id in self.settings.owner_ids
+            if owner_id != chat_id
+        ]
+        if deliveries:
+            results = await asyncio.gather(*deliveries, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.debug("Could not notify owner about new chat %s", chat_id, exc_info=result)
+
+    def admin_status_text(self) -> str:
+        sqlite = "🟢 متصل" if self.store.connection is not None else "🔴 غير متصل — وضع الذاكرة"
+        broadcast = "🟡 إذاعة قيد التنفيذ" if self.broadcast_task and not self.broadcast_task.done() else "🟢 لا توجد إذاعة قيد التنفيذ"
+        uptime = max(0, int(time.time() - APP_STARTED_AT))
+        hours, remainder = divmod(uptime, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return (
+            "🟢 <b>حالة البوت الآن</b>\n\n"
+            f"⚙️ العملية: <b>تعمل</b>\n"
+            f"🗄 قاعدة البيانات: <b>{sqlite}</b>\n"
+            f"⏱ مدة التشغيل: <b>{hours}س {minutes}د {seconds}ث</b>\n"
+            f"🔄 جلسات نشطة أو قيد التنفيذ: <b>{self.store.active_session_count()}</b>\n"
+            f"📢 الإذاعة: <b>{broadcast}</b>\n"
+            f"🖼 الصور المتاحة: <b>{len(available_template_images())}</b>\n"
+            f"🎬 الفيديوهات التحفيزية: <b>{len(available_motivation_videos())}</b>\n"
+            f"🧮 أخطاء SQLite المسجلة: <b>{self.store.sqlite_failure_count}</b>\n"
+            f"🕐 توقيت القاهرة: <code>{html.escape(cairo_now().strftime('%Y-%m-%d %H:%M:%S'))}</code>"
+        )
+
+    @staticmethod
+    def _admin_user_line(index: int, item: dict) -> str:
+        name = " ".join(part for part in (item.get("first_name", ""), item.get("last_name", "")) if part).strip() or "بدون اسم"
+        username = f"@{item['username']}" if item.get("username") else "بدون username"
+        status = "🚫" if item.get("is_blocked") else "✅"
+        created = str(item.get("created_at", "")).replace("T", " ")[:16]
+        seen = str(item.get("last_seen_at", "")).replace("T", " ")[:16]
+        return (
+            f"{index}. {status} <code>{item.get('chat_id')}</code> — {html.escape(name[:30])} — "
+            f"{html.escape(username)}\n   <i>أول دخول: {html.escape(created)} | آخر نشاط: {html.escape(seen)}</i>"
+        )
+
+    def admin_new_users_text(self) -> str:
+        users = self.store.new_users(24, 30)
+        if not users:
+            return "🆕 <b>الأعضاء الجدد</b>\n\nلا يوجد عضو جديد خلال آخر 24 ساعة."
+        lines = [f"🆕 <b>الأعضاء الجدد خلال آخر 24 ساعة</b> ({len(users)})", ""]
+        lines.extend(self._admin_user_line(index, item) for index, item in enumerate(users, 1))
+        return "\n".join(lines)[:3900]
+
+    def admin_user_profile_text(self, chat_id: int) -> str:
+        profile = self.store.user_profile(chat_id)
+        if not profile:
+            return f"🔎 لا يوجد عضو مسجل بالمعرّف <code>{chat_id}</code>."
+        name = " ".join(part for part in (profile.get("first_name", ""), profile.get("last_name", "")) if part).strip() or "بدون اسم"
+        username = f"@{profile['username']}" if profile.get("username") else "بدون username"
+        status = "🚫 محظور" if profile.get("is_blocked") else "✅ نشط"
+        events = self.store.recent_events_for_chat(chat_id, 6)
+        event_lines = []
+        for event in events:
+            timestamp = html.escape(str(event.get("created_at", "")).replace("T", " ")[-8:])
+            details = html.escape(str(event.get("details", ""))[:60])
+            event_lines.append(f"<code>{timestamp}</code> — <b>{html.escape(str(event.get('event_type', 'event')))}</b> {details}")
+        recent_activity = "\n".join(event_lines) if event_lines else "لا توجد أحداث بعد."
+        return (
+            "🔎 <b>ملف العضو</b>\n\n"
+            f"👤 الاسم: <b>{html.escape(name[:80])}</b>\n"
+            f"🔗 username: <code>{html.escape(username)}</code>\n"
+            f"🆔 chat_id: <code>{chat_id}</code>\n"
+            f"📌 الحالة: <b>{status}</b>\n"
+            f"🕐 أول دخول: <code>{html.escape(str(profile.get('created_at', '')).replace('T', ' ')[:19])}</code>\n"
+            f"👀 آخر نشاط: <code>{html.escape(str(profile.get('last_seen_at', '')).replace('T', ' ')[:19])}</code>\n"
+            f"📚 الجلسة الحالية: <b>{html.escape(str(profile.get('current_step', 'idle')))}</b>\n"
+            f"✅ الجلسات المكتملة: <b>{profile.get('total_sessions', 0)}</b>\n"
+            f"⏱ دقائق المذاكرة: <b>{profile.get('total_minutes', 0)}</b>\n"
+            f"🕘 سجلات الجلسات: <b>{profile.get('history_count', 0)}</b>\n"
+            f"🧾 الأحداث المسجلة: <b>{profile.get('event_count', 0)}</b>\n\n"
+            f"<b>آخر نشاط:</b>\n{recent_activity}"
+        )
+
     async def admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not self.owner_required(update):
             return
@@ -689,8 +820,11 @@ class StudyBot:
         totals = self.store.bot_totals()
         await update.message.reply_text(
             "🛠 <b>لوحة مالك البوت</b>\n\n"
-            f"👥 المستخدمون: <b>{totals['users']}</b>  •  🚫 المحظورون: <b>{totals['blocked']}</b>\n"
-            f"✅ الجلسات: <b>{totals['sessions']}</b>  •  ⏱ الدقائق: <b>{totals['minutes']}</b>",
+            "أهلًا يا مالك البوت، من هنا تقدر تتابع كل شيء بهدوء وتتحكم في الإعدادات بأمان.\n\n"
+            f"👥 المستخدمون: <b>{totals['users']}</b>  •  🆕 آخر 24 ساعة: <b>{self.store.count_users_since(24, 'created_at')}</b>\n"
+            f"🚫 المحظورون: <b>{totals['blocked']}</b>  •  🟢 النشطون اليوم: <b>{self.store.count_users_since(24)}</b>\n"
+            f"✅ الجلسات: <b>{totals['sessions']}</b>  •  ⏱ الدقائق: <b>{totals['minutes']}</b>\n\n"
+            "اختر القسم الذي تريد مراجعته:",
             parse_mode=ParseMode.HTML,
             reply_markup=self.admin_keyboard(),
         )
@@ -701,23 +835,23 @@ class StudyBot:
         return (
             "📊 <b>إحصائيات البوت</b>\n\n"
             f"👥 إجمالي المستخدمين: <b>{totals['users']}</b>\n"
+            f"🆕 أعضاء جدد آخر 24 ساعة: <b>{self.store.count_users_since(24, 'created_at')}</b>\n"
+            f"👀 أعضاء نشطون آخر 24 ساعة: <b>{self.store.count_users_since(24)}</b>\n"
             f"🚫 المستخدمون المحظورون: <b>{totals['blocked']}</b>\n"
             f"✅ الجلسات المسجلة: <b>{totals['sessions']}</b>\n"
+            f"🔄 جلسات نشطة أو قيد الإعداد: <b>{self.store.active_session_count()}</b>\n"
             f"⏱ إجمالي دقائق المذاكرة: <b>{totals['minutes']}</b>\n"
-            f"🧾 أحداث آخر 10 دقائق: <b>{len(recent)}</b>"
+            f"🧾 أحداث آخر 10 دقائق: <b>{len(recent)}</b>\n"
+            f"🗄 حالة SQLite: <b>{'متصل' if self.store.connection is not None else 'وضع الذاكرة'}</b>"
         )
 
     def admin_users_text(self) -> str:
         users = self.store.list_users(30)
         if not users:
             return "👥 لا توجد بيانات أعضاء مسجلة بعد."
-        lines = ["👥 <b>آخر الأعضاء نشاطًا</b>", ""]
-        for index, item in enumerate(users, 1):
-            name = " ".join(part for part in (item["first_name"], item["last_name"]) if part).strip() or "بدون اسم"
-            username = f"@{item['username']}" if item["username"] else "بدون username"
-            status = "🚫" if item["is_blocked"] else "✅"
-            lines.append(f"{index}. {status} <code>{item['chat_id']}</code> — {html.escape(name[:30])} — {html.escape(username)}")
-        return "\n".join(lines)
+        lines = ["👥 <b>آخر الأعضاء نشاطًا</b>", "", "اضغط «بحث عن عضو» لعرض ملف عضو محدد.", ""]
+        lines.extend(self._admin_user_line(index, item) for index, item in enumerate(users, 1))
+        return "\n".join(lines)[:3900]
 
     def admin_logs_text(self) -> str:
         events = self.store.recent_events(10, 80)
@@ -760,6 +894,15 @@ class StudyBot:
             self.store.set_blocked(target, blocked)
             self.store.log_event(chat_id, action, str(target))
             await message.reply_text(("🚫 تم حظر العضو." if blocked else "✅ تم فك حظر العضو.") + f"\nID: <code>{target}</code>", parse_mode=ParseMode.HTML, reply_markup=self.admin_keyboard())
+            return
+        if action == "lookup":
+            try:
+                target = int(text.strip())
+            except ValueError:
+                await message.reply_text("⚠️ أرسل chat_id رقميًا صحيحًا، مثل <code>123456789</code>.", parse_mode=ParseMode.HTML, reply_markup=self.admin_keyboard())
+                return
+            self.store.log_event(chat_id, "admin_lookup", str(target))
+            await message.reply_text(self.admin_user_profile_text(target), parse_mode=ParseMode.HTML, reply_markup=self.admin_keyboard())
             return
         if action == "broadcast":
             if self.broadcast_task and not self.broadcast_task.done():
@@ -817,14 +960,22 @@ class StudyBot:
         if not self.is_owner(query.from_user.id if query.from_user else None):
             await query.message.reply_text("غير مصرح.")
             return True
+        self.admin_pending.pop(chat_id, None)
         if data == "subscription:check":
             self.subscription_cache.clear()
             await query.message.reply_text("✅ حساب المالك مستثنى من الاشتراك الإجباري.", reply_markup=self.admin_keyboard())
             return True
-        if data == "admin:stats":
+        if data == "admin:status":
+            await query.message.reply_text(self.admin_status_text(), parse_mode=ParseMode.HTML, reply_markup=self.admin_keyboard())
+        elif data == "admin:stats":
             await query.message.reply_text(self.admin_stats_text(), parse_mode=ParseMode.HTML, reply_markup=self.admin_keyboard())
         elif data == "admin:users":
             await query.message.reply_text(self.admin_users_text(), parse_mode=ParseMode.HTML, reply_markup=self.admin_keyboard())
+        elif data == "admin:new_users":
+            await query.message.reply_text(self.admin_new_users_text(), parse_mode=ParseMode.HTML, reply_markup=self.admin_keyboard())
+        elif data == "admin:lookup":
+            self.admin_pending[chat_id] = "lookup"
+            await query.message.reply_text("🔎 أرسل chat_id العضو، وسأعرض لك حالته وإحصاءاته وسجل نشاطه.", parse_mode=ParseMode.HTML, reply_markup=self.admin_keyboard())
         elif data == "admin:logs":
             await query.message.reply_text(self.admin_logs_text(), parse_mode=ParseMode.HTML, reply_markup=self.admin_keyboard())
         elif data == "admin:block":
@@ -836,6 +987,13 @@ class StudyBot:
         elif data == "admin:broadcast":
             self.admin_pending[chat_id] = "broadcast"
             await query.message.reply_text("📢 أرسل نص الإذاعة الآن. سيتم الإرسال للمستخدمين غير المحظورين.", reply_markup=self.admin_keyboard())
+        elif data == "admin:broadcast_cancel":
+            if self.broadcast_task and not self.broadcast_task.done():
+                self.broadcast_task.cancel()
+                self.store.log_event(chat_id, "broadcast_cancelled")
+                await query.message.reply_text("⏹ تم طلب إيقاف الإذاعة الحالية. لن تُرسل رسائل جديدة بعد إلغاء المهمة.", reply_markup=self.admin_keyboard())
+            else:
+                await query.message.reply_text("ℹ️ لا توجد إذاعة قيد التنفيذ حاليًا.", reply_markup=self.admin_keyboard())
         elif data == "admin:subscription":
             await self.admin_subscription(query.message)
         elif data == "admin:sub_set":
@@ -887,6 +1045,8 @@ class StudyBot:
             return
 
         if data == "start":
+            if await self.tell_session_is_locked(query.message, chat_id):
+                return
             self.cancel_reminder(chat_id)
             reset_flow(self.store, chat_id)
             self.nav.pop(chat_id, None)
@@ -1063,6 +1223,8 @@ class StudyBot:
             return
 
         if data == "new":
+            if await self.tell_session_is_locked(query.message, chat_id):
+                return
             self.cancel_reminder(chat_id)
             reset_flow(self.store, chat_id)
             await self.send_categories(query.message)
@@ -1070,6 +1232,8 @@ class StudyBot:
     async def choose_template(self, message, chat_id: int, template_id: int) -> None:
         template = TEMPLATE_BY_ID.get(template_id)
         if not template:
+            return
+        if await self.tell_session_is_locked(message, chat_id):
             return
         session = self.store.get(chat_id)
         session.update({
