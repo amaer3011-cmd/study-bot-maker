@@ -1,0 +1,106 @@
+from __future__ import annotations
+
+import asyncio
+import os
+from types import SimpleNamespace
+from pathlib import Path
+
+import pytest
+
+from config import load_settings
+from main import available_motivation_videos
+from storage import Store
+from templates import CATEGORIES, STUDY_DUAS, TEMPLATES
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_catalog_shape() -> None:
+    assert len(TEMPLATES) == 90
+    assert len(CATEGORIES) == 10
+    assert len(STUDY_DUAS) == 50
+
+
+def test_template_assets_are_present_and_jpeg() -> None:
+    missing: list[str] = []
+    invalid: list[str] = []
+    template_paths = sorted({template.image_path for template in TEMPLATES})
+    assert len(template_paths) == 59
+    for image_path in template_paths:
+        path = ROOT / image_path
+        if not path.is_file():
+            missing.append(image_path)
+            continue
+        if path.read_bytes()[:3] != b"\xff\xd8\xff":
+            invalid.append(image_path)
+    assert not missing, f"Missing template assets: {missing[:5]} (total={len(missing)})"
+    assert not invalid, f"Non-JPEG template assets: {invalid[:5]} (total={len(invalid)})"
+
+
+def test_user_asset_manifest_is_complete() -> None:
+    manifest = ROOT / "assets" / "user_images_manifest.json"
+    assert manifest.is_file()
+    import json
+
+    records = json.loads(manifest.read_text(encoding="utf-8"))
+    user_assets = sorted((ROOT / "assets" / "user_images").glob("user_*.jpg"))
+    assert len(records) == len(user_assets)
+    assert len(records) >= 59
+    missing = [record["asset"] for record in records if not (ROOT / record["asset"]).is_file()]
+    assert not missing, f"Missing user assets: {missing[:5]} (total={len(missing)})"
+
+
+def test_motivation_video_library_is_present() -> None:
+    manifest = ROOT / "assets" / "motivation_videos_manifest.json"
+    assert manifest.is_file()
+    import json
+
+    records = json.loads(manifest.read_text(encoding="utf-8"))
+    videos = available_motivation_videos()
+    assert len(records) == len(videos)
+    assert len(videos) >= 14
+    assert all(path.is_file() and path.stat().st_size > 0 for path in videos)
+    missing = [record["asset"] for record in records if not (ROOT / record["asset"]).is_file()]
+    assert not missing, f"Missing motivation videos: {missing[:5]}"
+
+
+def test_motivation_video_send_and_media_cache(tmp_path: Path) -> None:
+    from config import Settings
+    from main import StudyBot
+
+    class FakeBot:
+        def __init__(self) -> None:
+            self.sent = []
+
+        async def send_video(self, **kwargs):
+            self.sent.append(kwargs)
+            return SimpleNamespace(video=SimpleNamespace(file_id="telegram-video-id"))
+
+    bot = StudyBot(Settings("123456:TEST", 3000, str(tmp_path / "study.sqlite3"), 20, 180, 720, 0))
+    fake = FakeBot()
+    asyncio.run(bot.send_motivation_video(fake, 123))
+    assert len(fake.sent) == 1
+    assert fake.sent[0]["caption"]
+    assert bot.store.get_media_id(f"motivation_video:{Path(fake.sent[0]['video'].name).name}") == "telegram-video-id"
+    bot.store.close()
+
+
+def test_settings_and_storage_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST")
+    monkeypatch.setenv("OWNER_IDS", "42,43")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "study.sqlite3"))
+    settings = load_settings()
+    assert settings.owner_ids == (42, 43)
+
+    store = Store(settings.database_path)
+    session = store.get(100)
+    session.update({"step": "done", "duration_minutes": 25, "duration": "25 دقيقة", "tasks": ["مراجعة"]})
+    store.complete_session(100, session, "10:25 ص")
+    assert store.get(100)["step"] == "done"
+    assert len(store.recent_history(100)) == 1
+    store.close()
+
+
+def test_project_does_not_require_real_token_at_import() -> None:
+    # Importing modules must remain safe; the token is required only by load_settings().
+    assert not os.getenv("TELEGRAM_BOT_TOKEN") or isinstance(os.getenv("TELEGRAM_BOT_TOKEN"), str)

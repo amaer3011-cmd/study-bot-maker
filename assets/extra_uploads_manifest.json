@@ -1,0 +1,23 @@
+{
+  "count": 2,
+  "images": [
+    {
+      "asset": "assets/extra_uploads/extra_001.jpg",
+      "original_name": "photo_2026-08-24_22-54-51.jpg",
+      "sha256": "1bc1980d14b0210e438012cc762655ceb379ad996405f21b9a9defb63c89b9a8",
+      "width": 735,
+      "height": 920,
+      "format": "JPEG",
+      "bytes": 84081
+    },
+    {
+      "asset": "assets/extra_uploads/extra_002.jpg",
+      "original_name": "photo_2026-08-26_15-51-01.jpg",
+      "sha256": "ca2c1e632127d389b30e611ee7d08819ff240e5877bbdd6ffdf9b624345d47a9",
+      "width": 719,
+      "height": 828,
+      "format": "JPEG",
+      "bytes": 31998
+    }
+  ]
+}

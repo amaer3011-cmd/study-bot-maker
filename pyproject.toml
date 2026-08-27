@@ -1,0 +1,12 @@
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+# Keep CI focused on correctness first; style cleanup can be expanded later.
+select = ["E9", "F63", "F7", "F82"]
