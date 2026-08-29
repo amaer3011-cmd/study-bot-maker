@@ -166,5 +166,101 @@
     "audio_codec": "aac",
     "bytes": 2414308,
     "added_at": "2026-08-27T17:34:51+00:00"
+  },
+  {
+    "asset": "assets/motivation_videos/video_015.mp4",
+    "original_name": "019.mp4",
+    "sha256": "536ff2a8a337abc9cd5bcb02b62132820619b9dbcfd18337acd8f419449a1568",
+    "duration_seconds": 56.383,
+    "width": 720,
+    "height": 1280,
+    "video_codec": "h264",
+    "audio_codec": "aac",
+    "bytes": 2766712,
+    "added_at": "2026-08-29T08:30:17+00:00"
+  },
+  {
+    "asset": "assets/motivation_videos/video_016.mp4",
+    "original_name": "23.mp4",
+    "sha256": "eeafc4447aefe162e739ed80465ef1e4d95606e8b9dd1b1b3d00fa1d2edab2fc",
+    "duration_seconds": 8.533,
+    "width": 720,
+    "height": 1280,
+    "video_codec": "h264",
+    "audio_codec": "aac",
+    "bytes": 918613,
+    "added_at": "2026-08-29T08:30:17+00:00"
+  },
+  {
+    "asset": "assets/motivation_videos/video_017.mp4",
+    "original_name": "314.mp4",
+    "sha256": "c87a0d993f6c973bebad78c63ea4c46b2fe7bc9765c9672840c6530403bdb34c",
+    "duration_seconds": 19.111,
+    "width": 720,
+    "height": 1280,
+    "video_codec": "h264",
+    "audio_codec": "aac",
+    "bytes": 1424975,
+    "added_at": "2026-08-29T08:30:17+00:00"
+  },
+  {
+    "asset": "assets/motivation_videos/video_018.mp4",
+    "original_name": "402.mp4",
+    "sha256": "375a1ab19a0da88685572cf9a66cd3f760926c365717fefaa8fa2b3214f68e89",
+    "duration_seconds": 75.21,
+    "width": 576,
+    "height": 1024,
+    "video_codec": "h264",
+    "audio_codec": "aac",
+    "bytes": 2361544,
+    "added_at": "2026-08-29T08:30:17+00:00"
+  },
+  {
+    "asset": "assets/motivation_videos/video_019.mp4",
+    "original_name": "6954525749_pin.mp4",
+    "sha256": "f0b445b433d18ed140495bd080fc264ad23649774a5725e14ca2705cd72726e3",
+    "duration_seconds": 23.317,
+    "width": 720,
+    "height": 1128,
+    "video_codec": "h264",
+    "audio_codec": "aac",
+    "bytes": 4507741,
+    "added_at": "2026-08-29T08:30:17+00:00"
+  },
+  {
+    "asset": "assets/motivation_videos/video_020.mp4",
+    "original_name": "814.mp4",
+    "sha256": "e614a8e5b50eb4cf562108d9f51ec2d97214e49171d3d796a6d7d13532837242",
+    "duration_seconds": 58.417,
+    "width": 720,
+    "height": 1260,
+    "video_codec": "h264",
+    "audio_codec": "aac",
+    "bytes": 5102468,
+    "added_at": "2026-08-29T08:30:17+00:00"
+  },
+  {
+    "asset": "assets/motivation_videos/video_021.mp4",
+    "original_name": "ث.mp4",
+    "sha256": "b429137b53aac09c94b1e174cf567cc568c3ac1bba28c63790b7df86495e8df8",
+    "duration_seconds": 58.096,
+    "width": 720,
+    "height": 1280,
+    "video_codec": "h264",
+    "audio_codec": "aac",
+    "bytes": 6963384,
+    "added_at": "2026-08-29T08:30:17+00:00"
+  },
+  {
+    "asset": "assets/motivation_videos/video_022.mp4",
+    "original_name": "ل.mp4",
+    "sha256": "89f83baca57369b61e7256fa2fb154a1fb14fe65d50fe0526db2e18f4548355a",
+    "duration_seconds": 38.7,
+    "width": 576,
+    "height": 1024,
+    "video_codec": "h264",
+    "audio_codec": "aac",
+    "bytes": 5051260,
+    "added_at": "2026-08-29T08:30:17+00:00"
   }
 ]
