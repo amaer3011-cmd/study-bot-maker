@@ -613,14 +613,16 @@ class StudyBot:
             name = html.escape(update.effective_user.first_name if update.effective_user else "طالب")
             today_sessions = self.store.daily_session_count(chat_id)
             await update.message.reply_text(
-                f"أهلاً <b>{name}</b> 📚✨\n\n"
-                "أنا <b>Study Bot Maker</b>، هساعدك تعمل بطاقة مذاكرة منظمة وجميلة في خطوات بسيطة:\n\n"
-                "1️⃣ اختار تصميمًا مناسبًا\n"
-                "2️⃣ حدد وقت البداية والمدة\n"
-                "3️⃣ اكتب مهامك\n"
-                "4️⃣ استلم بطاقتك وتذكيرك التلقائي\n\n"
+                f"يا أهلاً وسهلاً <b>{name}</b> 🤍📚\n\n"
+                "نورتني! أنا <b>Study Bot Maker</b>، وهنظّم لك جلسة مذاكرة لطيفة تساعدك تبدأ من غير ضغط وتنجز خطوة خطوة ✨\n\n"
+                "هنعمل معًا بطاقة مذاكرة جميلة ومنظمة:\n"
+                "1️⃣ اختار التصميم اللي يعجبك\n"
+                "2️⃣ حدد وقت البداية والمدة المناسبة لك\n"
+                "3️⃣ اكتب المهام اللي حابب تنجزها\n"
+                "4️⃣ استلم بطاقتك وتذكيرك، وابدأ بهدوء 💪\n\n"
+                "مش مهم تبدأ بكم كبير؛ المهم تبدأ، وأنا معك خطوة بخطوة 🌱\n\n"
                 f"🎨 <b>{len(TEMPLATES)} تصميم</b>  •  📂 <b>{len(CATEGORIES)} أقسام</b>\n"
-                f"📅 <b>Today: {today_sessions} completed sessions</b>",
+                f"📅 أنجزت اليوم: <b>{today_sessions} جلسة</b>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📝 ابدأ جلسة مذاكرة", callback_data="start")],
