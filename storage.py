@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
@@ -103,6 +104,38 @@ class Store:
                     updated_at TEXT NOT NULL
                 )"""
             )
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS group_camps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    creator_id INTEGER NOT NULL,
+                    subject TEXT NOT NULL,
+                    lesson TEXT NOT NULL,
+                    topics TEXT NOT NULL,
+                    time_range TEXT NOT NULL,
+                    motivation TEXT NOT NULL,
+                    link TEXT NOT NULL DEFAULT '',
+                    start_time TEXT NOT NULL DEFAULT '',
+                    duration_minutes INTEGER NOT NULL DEFAULT 0,
+                    starts_at REAL NOT NULL DEFAULT 0,
+                    ends_at REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'scheduled',
+                    announcement_message_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS group_camp_participants (
+                    camp_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    username TEXT NOT NULL DEFAULT '',
+                    first_name TEXT NOT NULL DEFAULT '',
+                    joined_at TEXT NOT NULL,
+                    PRIMARY KEY(camp_id, user_id),
+                    FOREIGN KEY(camp_id) REFERENCES group_camps(id) ON DELETE CASCADE
+                )"""
+            )
             self._migrate_schema()
         except Exception:
             logger.exception("SQLite unavailable; using memory only")
@@ -130,6 +163,8 @@ class Store:
         self.connection.execute("CREATE INDEX IF NOT EXISTS idx_users_created ON bot_users(created_at DESC)")
         self.connection.execute("CREATE INDEX IF NOT EXISTS idx_users_blocked ON bot_users(is_blocked)")
         self.connection.execute("CREATE INDEX IF NOT EXISTS idx_events_created ON bot_events(created_at DESC)")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS idx_group_camps_schedule ON group_camps(status, starts_at)")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS idx_group_camp_participants ON group_camp_participants(camp_id)")
 
     def _record_sqlite_failure(self) -> None:
         self.sqlite_failure_count += 1
@@ -534,6 +569,122 @@ class Store:
                 rows = self.connection.execute("SELECT chat_id FROM bot_users WHERE is_blocked=0").fetchall()
             return [int(row[0]) for row in rows]
         except Exception:
+            return []
+
+    def create_group_camp(self, camp: dict) -> int | None:
+        """Persist a scheduled camp and return its stable id."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if not self.connection:
+            return None
+        try:
+            with self.lock:
+                cursor = self.connection.execute(
+                    """INSERT INTO group_camps
+                    (chat_id, creator_id, subject, lesson, topics, time_range, motivation, link,
+                     start_time, duration_minutes, starts_at, ends_at, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        camp["chat_id"], camp["creator_id"], camp["subject"], camp["lesson"],
+                        json.dumps(camp.get("topics", []), ensure_ascii=False), camp["time_range"],
+                        camp["motivation"], camp.get("link", ""), camp.get("start_time", ""),
+                        camp.get("duration_minutes", 0), camp.get("starts_at", 0), camp.get("ends_at", 0),
+                        camp.get("status", "scheduled"), now, now,
+                    ),
+                )
+                return int(cursor.lastrowid)
+        except Exception:
+            logger.exception("Could not create group camp")
+            return None
+
+    def get_group_camp(self, camp_id: int) -> dict | None:
+        if not self.connection:
+            return None
+        try:
+            with self.lock:
+                row = self.connection.execute("SELECT * FROM group_camps WHERE id=?", (camp_id,)).fetchone()
+                if not row:
+                    return None
+                keys = [column[1] for column in self.connection.execute("PRAGMA table_info(group_camps)")]
+                camp = dict(zip(keys, row))
+                camp["topics"] = json.loads(camp.get("topics") or "[]")
+                count = self.connection.execute(
+                    "SELECT COUNT(*) FROM group_camp_participants WHERE camp_id=?", (camp_id,)
+                ).fetchone()[0]
+                camp["participant_count"] = int(count)
+                return camp
+        except Exception:
+            logger.exception("Could not read group camp %s", camp_id)
+            return None
+
+    def update_group_camp(self, camp_id: int, **changes) -> bool:
+        allowed = {"status", "announcement_message_id", "starts_at", "ends_at", "time_range"}
+        changes = {key: value for key, value in changes.items() if key in allowed}
+        if not self.connection or not changes:
+            return False
+        changes["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            assignments = ", ".join(f"{key}=?" for key in changes)
+            with self.lock:
+                self.connection.execute(
+                    f"UPDATE group_camps SET {assignments} WHERE id=?",
+                    (*changes.values(), camp_id),
+                )
+            return True
+        except Exception:
+            logger.exception("Could not update group camp %s", camp_id)
+            return False
+
+    def add_group_camp_participant(self, camp_id: int, user: dict) -> tuple[bool, int]:
+        if not self.connection:
+            return False, 0
+        try:
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            with self.lock:
+                cursor = self.connection.execute(
+                    """INSERT OR IGNORE INTO group_camp_participants
+                    (camp_id, user_id, username, first_name, joined_at) VALUES (?, ?, ?, ?, ?)""",
+                    (camp_id, user["user_id"], user.get("username", ""), user.get("first_name", ""), now),
+                )
+                count = self.connection.execute(
+                    "SELECT COUNT(*) FROM group_camp_participants WHERE camp_id=?", (camp_id,)
+                ).fetchone()[0]
+            return cursor.rowcount == 1, int(count)
+        except Exception:
+            logger.exception("Could not add participant to group camp %s", camp_id)
+            return False, 0
+
+    def scheduled_group_camps(self, now: float | None = None) -> list[dict]:
+        if not self.connection:
+            return []
+        now = time.time() if now is None else now
+        try:
+            with self.lock:
+                rows = self.connection.execute(
+                    "SELECT id, chat_id, starts_at, ends_at, status FROM group_camps "
+                    "WHERE status IN ('scheduled','active') AND (ends_at<=? OR starts_at<=?)",
+                    (now, now),
+                ).fetchall()
+            return [dict(zip(("id", "chat_id", "starts_at", "ends_at", "status"), row)) for row in rows]
+        except Exception:
+            logger.exception("Could not read scheduled group camps")
+            return []
+
+    def group_camps_for_chat(self, chat_id: int, limit: int = 10) -> list[dict]:
+        if not self.connection:
+            return []
+        limit = max(1, min(int(limit), 50))
+        try:
+            with self.lock:
+                rows = self.connection.execute(
+                    "SELECT id, subject, lesson, start_time, duration_minutes, status, participant_count "
+                    "FROM (SELECT c.*, (SELECT COUNT(*) FROM group_camp_participants p WHERE p.camp_id=c.id) AS participant_count "
+                    "FROM group_camps c WHERE c.chat_id=?) ORDER BY id DESC LIMIT ?",
+                    (chat_id, limit),
+                ).fetchall()
+            keys = ["id", "subject", "lesson", "start_time", "duration_minutes", "status", "participant_count"]
+            return [dict(zip(keys, row)) for row in rows]
+        except Exception:
+            logger.exception("Could not list group camps for %s", chat_id)
             return []
 
     def log_event(self, chat_id: int, event_type: str, details: str = "") -> None:

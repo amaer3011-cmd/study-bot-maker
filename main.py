@@ -13,7 +13,7 @@ from pathlib import Path
 from threading import Thread
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
-from telegram.constants import ChatMemberStatus, ParseMode
+from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import RetryAfter
 from telegram.ext import (
     Application,
@@ -26,6 +26,7 @@ from telegram.ext import (
 )
 
 from config import Settings, load_settings
+from group_sessions import GroupCamp, normalize_camp_value, render_group_camp
 from storage import Store, reset_flow
 from templates import CATEGORIES, CATEGORY_BY_ID, TEMPLATE_BY_ID, TEMPLATES, preview, random_dua, render_card
 from utils import (
@@ -89,6 +90,8 @@ class StudyBot:
         self.subscription_cache: dict[int, tuple[float, bool]] = {}
         self.broadcast_task: asyncio.Task | None = None
         self.bot_username: str | None = None
+        self.group_camps: dict[int, GroupCamp] = {}
+        self.group_camp_loop_task: asyncio.Task | None = None
 
     def chat_lock(self, chat_id: int) -> asyncio.Lock:
         lock = self.chat_locks.get(chat_id)
@@ -275,6 +278,12 @@ class StudyBot:
         rows.append([InlineKeyboardButton("✅ تحقّق من الاشتراك", callback_data="subscription:check")])
         return InlineKeyboardMarkup(rows)
 
+    @staticmethod
+    def group_camp_keyboard(camp_id: int, participants: int = 0) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"🙋‍♂️ انضم للمعسكر ({participants})", callback_data=f"camp:join:{camp_id}"),
+        ]])
+
     def is_owner(self, user_id: int | None) -> bool:
         return bool(user_id is not None and user_id in self.settings.owner_ids)
 
@@ -305,7 +314,14 @@ class StudyBot:
         user = update.effective_user
         chat = update.effective_chat
         message = update.effective_message
-        if not user or not chat or not message:
+        if not chat or not message:
+            return False
+        # Channel posts have no effective_user. Telegram only delivers them
+        # from channel administrators, so channel camp setup is trusted here.
+        if not user and chat.type == ChatType.CHANNEL:
+            self.store.log_event(chat.id, "channel_update", (message.text or "")[:120])
+            return True
+        if not user:
             return False
         is_new_user = self.store.upsert_user(chat.id, user.id, user.username or "", user.first_name or "", user.last_name or "")
         if is_new_user:
@@ -327,6 +343,24 @@ class StudyBot:
                 )
                 return False
         return True
+
+    async def can_manage_group_camp(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        chat = update.effective_chat
+        user = update.effective_user
+        if not chat:
+            return False
+        if chat.type in {ChatType.PRIVATE, ChatType.CHANNEL}:
+            return True
+        if not user:
+            return False
+        if self.is_owner(user.id):
+            return True
+        try:
+            member = await context.bot.get_chat_member(chat.id, user.id)
+            return member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}
+        except Exception:
+            logger.warning("Could not verify camp manager permissions for %s", chat.id, exc_info=True)
+            return False
 
     async def send_categories(self, message) -> None:
         await message.reply_text(
@@ -644,6 +678,140 @@ class StudyBot:
                 self.cancel_reminder(chat_id)
                 reset_flow(self.store, chat_id)
                 await self.send_categories(update.message)
+
+    async def camp(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Start a guided composer for a scheduled group/channel camp."""
+        message = update.effective_message
+        if not message or not update.effective_chat:
+            return
+        if not await self.ensure_access(update, context):
+            return
+        if not await self.can_manage_group_camp(update, context):
+            await update.message.reply_text("🔒 إنشاء المعسكرات داخل الجروبات متاح للمشرفين فقط.")
+            return
+        chat_id = update.effective_chat.id
+        async with self.chat_lock(chat_id):
+            creator_id = update.effective_user.id if update.effective_user else chat_id
+            self.group_camps[chat_id] = GroupCamp(chat_id=chat_id, creator_id=creator_id)
+            await message.reply_text(
+                "🎓 <b>هنجهّز رسالة معسكر جماعي</b>\n\n"
+                "اكتب اسم المادة أو الموضوع، مثل: <code>الفيزياء</code>",
+                parse_mode=ParseMode.HTML,
+            )
+
+    async def camps(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat or not await self.ensure_access(update, context):
+            return
+        rows = self.store.group_camps_for_chat(chat.id, 10)
+        if not rows:
+            await message.reply_text("📚 لا توجد معسكرات مسجلة هنا بعد. أرسل /camp لإنشاء أول معسكر.")
+            return
+        status_labels = {"scheduled": "مجدول", "active": "جاري", "completed": "منتهٍ", "cancelled": "ملغى"}
+        lines = ["🎓 <b>معسكرات هذه المحادثة</b>", ""]
+        for item in rows:
+            lines.append(
+                f"• <code>#{item['id']}</code> — {html.escape(item['subject'])} — "
+                f"{status_labels.get(item['status'], item['status'])} — "
+                f"{item['participant_count']} مشارك"
+            )
+        lines.append("\nلإلغاء معسكر مجدول: <code>/cancel_camp رقم_المعسكر</code>")
+        await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+    async def cancel_camp(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        message = update.effective_message
+        chat = update.effective_chat
+        if not message or not chat or not await self.ensure_access(update, context):
+            return
+        if not await self.can_manage_group_camp(update, context):
+            await message.reply_text("🔒 إلغاء المعسكرات داخل الجروبات متاح للمشرفين فقط.")
+            return
+        try:
+            camp_id = int((context.args or [""])[0])
+        except (TypeError, ValueError):
+            await message.reply_text("استخدم الأمر هكذا: <code>/cancel_camp 12</code>", parse_mode=ParseMode.HTML)
+            return
+        camp = self.store.get_group_camp(camp_id)
+        if not camp or camp["chat_id"] != chat.id:
+            await message.reply_text("⚠️ لم أجد هذا المعسكر في هذه المحادثة.")
+            return
+        if camp["status"] in {"completed", "cancelled"}:
+            await message.reply_text("ℹ️ هذا المعسكر منتهٍ أو ملغى بالفعل.")
+            return
+        self.store.update_group_camp(camp_id, status="cancelled")
+        await message.reply_text(f"✅ تم إلغاء المعسكر <code>#{camp_id}</code>.", parse_mode=ParseMode.HTML)
+
+    async def _handle_camp_text(self, message, chat_id: int, text: str) -> bool:
+        camp = self.group_camps.get(chat_id)
+        if not camp:
+            return False
+        value = normalize_camp_value(camp.step, text)
+        if camp.step == "subject":
+            camp.subject = str(value)
+            camp.step = "lesson"
+            prompt = "📖 اكتب اسم الفصل أو الدرس، مثل: <code>الفصل الأول | القياس الفيزيائي</code>"
+        elif camp.step == "lesson":
+            camp.lesson = str(value)
+            camp.step = "topics"
+            prompt = "📝 اكتب نقاط المهام، كل نقطة في سطر (حتى 8 نقاط)."
+        elif camp.step == "topics":
+            camp.topics = value if isinstance(value, list) else [str(value)]
+            camp.step = "start_time"
+            prompt = "⏰ اكتب وقت البداية، مثل: <code>10:00 ص</code> أو <code>الآن</code>"
+        elif camp.step == "start_time":
+            start = parse_time(str(value))
+            if not start:
+                await message.reply_text("⚠️ لم أفهم وقت البداية. جرّب <code>10:00 ص</code> أو <code>الآن</code>.", parse_mode=ParseMode.HTML)
+                return True
+            camp.start_time = format_time(start)
+            camp.starts_at = start.timestamp()
+            camp.step = "duration"
+            prompt = "⏱️ اكتب مدة المعسكر، مثل: <code>ساعتين</code> أو <code>90 دقيقة</code>"
+        elif camp.step == "duration":
+            minutes = parse_duration(str(value))
+            if minutes <= 0 or minutes > self.settings.max_session_minutes:
+                await message.reply_text(f"⚠️ اكتب مدة صحيحة حتى {self.settings.max_session_minutes} دقيقة.")
+                return True
+            camp.duration_minutes = minutes
+            camp.ends_at = camp.starts_at + minutes * 60
+            end_local = datetime.fromtimestamp(camp.ends_at, tz=cairo_now().tzinfo)
+            camp.time_range = f"{camp.start_time} إلى {format_time(end_local)}"
+            camp.step = "motivation"
+            prompt = "💕 اكتب جملة التحفيز (أو أرسل - لاستخدام جملة افتراضية)."
+        elif camp.step == "motivation":
+            if str(value) != "-":
+                camp.motivation = str(value)
+            camp.step = "link"
+            prompt = "🔗 أرسل رابط الفيديو/القناة (أو - للتخطي)."
+        elif camp.step == "link":
+            if str(value) != "-":
+                camp.link = str(value)
+            self.group_camps.pop(chat_id, None)
+            await self.publish_group_camp(message, camp)
+            return True
+        await message.reply_text(prompt, parse_mode=ParseMode.HTML)
+        return True
+
+    async def publish_group_camp(self, message, camp: GroupCamp) -> None:
+        camp_id = self.store.create_group_camp({
+            "chat_id": camp.chat_id, "creator_id": camp.creator_id, "subject": camp.subject,
+            "lesson": camp.lesson, "topics": camp.topics, "time_range": camp.time_range,
+            "motivation": camp.motivation, "link": camp.link, "start_time": camp.start_time,
+            "duration_minutes": camp.duration_minutes, "starts_at": camp.starts_at,
+            "ends_at": camp.ends_at, "status": "scheduled",
+        })
+        if not camp_id:
+            await message.reply_text("⚠️ تعذر حفظ المعسكر. تأكد أن قاعدة البيانات تعمل ثم حاول مرة أخرى.")
+            return
+        camp.camp_id = camp_id
+        sent = await message.reply_text(
+            "✅ <b>تم نشر المعسكر الجماعي</b>\n\n" + render_group_camp(camp),
+            parse_mode=ParseMode.HTML,
+            reply_markup=self.group_camp_keyboard(camp_id),
+        )
+        self.store.update_group_camp(camp_id, announcement_message_id=sent.message_id)
+        self.store.log_event(camp.chat_id or message.chat_id, "group_camp_created", f"id={camp_id},subject={camp.subject[:100]}")
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message and update.effective_chat:
@@ -1035,6 +1203,30 @@ class StudyBot:
 
         if await self._admin_callback_locked(query, chat_id):
             return
+        if data.startswith("camp:join:"):
+            try:
+                camp_id = int(data.rsplit(":", 1)[1])
+            except (TypeError, ValueError):
+                return
+            camp = self.store.get_group_camp(camp_id)
+            if not camp or camp["chat_id"] != chat_id or not query.from_user:
+                return
+            if camp["status"] == "completed":
+                await query.answer("انتهى المعسكر بالفعل.", show_alert=True)
+                return
+            joined, count = self.store.add_group_camp_participant(camp_id, {
+                "user_id": query.from_user.id,
+                "username": query.from_user.username or "",
+                "first_name": query.from_user.first_name or "",
+            })
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=self.group_camp_keyboard(camp_id, count)
+                )
+            except Exception:
+                logger.debug("Could not update group camp participant count", exc_info=True)
+            await query.answer("✅ اتسجلت معانا في المعسكر!" if joined else "أنت مسجل بالفعل معانا.", show_alert=False)
+            return
         if data == "subscription:check":
             self.subscription_cache.pop(query.from_user.id, None)
             if await self.has_required_subscriptions(query.from_user.id, context.bot):
@@ -1257,41 +1449,47 @@ class StudyBot:
 
     # ---------- Text input ----------
     async def text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.message or not update.effective_chat or not update.message.text:
+        message = update.effective_message
+        if not message or not update.effective_chat or not message.text:
             return
         if not await self.ensure_access(update, context):
             return
         if self.owner_required(update) and self.admin_pending.get(update.effective_chat.id):
-            await self.handle_admin_text(update.message, update.effective_chat.id, update.message.text.strip())
+            await self.handle_admin_text(message, update.effective_chat.id, message.text.strip())
             return
         async with self.chat_lock(update.effective_chat.id):
+            if await self._handle_camp_text(
+                message, update.effective_chat.id, message.text.strip()
+            ):
+                return
             await self._text_locked(update, context)
 
     async def _text_locked(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.message or not update.effective_chat or not update.message.text:
+        message = update.effective_message
+        if not message or not update.effective_chat or not message.text:
             return
         chat_id = update.effective_chat.id
         session = self.store.get(chat_id)
-        text = update.message.text.strip()
+        text = message.text.strip()
 
         if session["step"] == "waiting_start_time":
             parsed = parse_time(text)
             if not parsed:
-                await update.message.reply_text('⚠️ لم أفهم الوقت. جرّب <code>3 العصر</code> أو <code>9:30 ص</code> أو <code>الآن</code>.', parse_mode=ParseMode.HTML)
+                await message.reply_text('⚠️ لم أفهم الوقت. جرّب <code>3 العصر</code> أو <code>9:30 ص</code> أو <code>الآن</code>.', parse_mode=ParseMode.HTML)
                 return
             session["start_time"] = format_time(parsed)
             session["step"] = "waiting_duration"
             self.store.save(chat_id, session)
-            await self.ask_duration(update.message, session["start_time"])
+            await self.ask_duration(message, session["start_time"])
             return
 
         if session["step"] == "waiting_duration":
             minutes = parse_duration(text)
             if minutes <= 0:
-                await update.message.reply_text('⚠️ لم أفهم المدة. جرّب <code>ساعتين</code> أو <code>90 دقيقة</code> أو <code>2h</code>.', parse_mode=ParseMode.HTML)
+                await message.reply_text('⚠️ لم أفهم المدة. جرّب <code>ساعتين</code> أو <code>90 دقيقة</code> أو <code>2h</code>.', parse_mode=ParseMode.HTML)
                 return
             if minutes > self.settings.max_session_minutes:
-                await update.message.reply_text(
+                await message.reply_text(
                     f'⚠️ أقصى مدة مسموحة {self.settings.max_session_minutes} دقيقة. جرّب مدة أقصر.',
                     parse_mode=ParseMode.HTML,
                 )
@@ -1303,29 +1501,29 @@ class StudyBot:
             session["duration_minutes"] = minutes
             session["step"] = "waiting_tasks"
             self.store.save(chat_id, session)
-            await self.ask_tasks(update.message)
+            await self.ask_tasks(message)
             return
 
         if session["step"] == "waiting_tasks":
             new_tasks = [line.strip()[:self.settings.max_task_chars] for line in text.splitlines() if line.strip()]
             if not new_tasks:
-                await update.message.reply_text("⚠️ اكتب مهمة واحدة على الأقل.")
+                await message.reply_text("⚠️ اكتب مهمة واحدة على الأقل.")
                 return
             remaining = max(0, self.settings.max_tasks - len(session["tasks"]))
             if remaining == 0:
-                await update.message.reply_text(f"⚠️ وصلت للحد الأقصى وهو {self.settings.max_tasks} مهام.")
+                await message.reply_text(f"⚠️ وصلت للحد الأقصى وهو {self.settings.max_tasks} مهام.")
                 return
             session["tasks"].extend(new_tasks[:remaining])
             session["tasks"] = session["tasks"][:self.settings.max_tasks]
             self.store.save(chat_id, session)
-            await update.message.reply_text(
+            await message.reply_text(
                 f"✅ تمت الإضافة. إجمالي المهام: <b>{len(session['tasks'])}</b>\n\n{self.task_list(session['tasks'])}\n\nأضف المزيد أو اضغط انتهيت:",
                 parse_mode=ParseMode.HTML,
                 reply_markup=self.task_keyboard(has_tasks=True),
             )
             return
 
-        await update.message.reply_text("أرسل /study لإنشاء جلسة مذاكرة جديدة 📚")
+        await message.reply_text("أرسل /study لإنشاء جلسة مذاكرة جديدة 📚")
 
     async def ask_duration(self, message, start_time: str) -> None:
         await message.reply_text(
@@ -1519,6 +1717,37 @@ class StudyBot:
                 expected_ends_at=ends,
             )
 
+    async def group_camp_scheduler_loop(self, application: Application) -> None:
+        """Advance scheduled/active camps using persisted timestamps."""
+        try:
+            while True:
+                now = time.time()
+                for item in self.store.scheduled_group_camps(now):
+                    camp = self.store.get_group_camp(item["id"])
+                    if not camp:
+                        continue
+                    if camp["status"] == "scheduled" and camp["starts_at"] <= now:
+                        self.store.update_group_camp(camp["id"], status="active")
+                        await application.bot.send_message(
+                            camp["chat_id"],
+                            "🚀 <b>بدأ المعسكر الجماعي الآن!</b>\n\n"
+                            "اقفل المشتتات وابدأ أول مهمة بتركيز. بالتوفيق يا أبطال 💪📚",
+                            parse_mode=ParseMode.HTML,
+                        )
+                    elif camp["status"] == "active" and camp["ends_at"] <= now:
+                        self.store.update_group_camp(camp["id"], status="completed")
+                        await application.bot.send_message(
+                            camp["chat_id"],
+                            "⏰ <b>انتهى المعسكر الجماعي!</b>\n\n"
+                            "اكتبوا عدد المهام التي أنجزتموها واحتفلوا بالخطوة الجميلة 🎉📖",
+                            parse_mode=ParseMode.HTML,
+                        )
+                await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Group camp scheduler stopped")
+
 
 class ReusableHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
@@ -1602,6 +1831,9 @@ def build_application(bot: StudyBot) -> Application:
             await application.bot.set_my_commands([
                 ("start", "بدء البوت"),
                 ("study", "إنشاء جلسة مذاكرة"),
+                ("camp", "إنشاء معسكر جماعي"),
+                ("camps", "عرض معسكرات المحادثة"),
+                ("cancel_camp", "إلغاء معسكر"),
                 ("stats", "عرض الإحصائيات"),
                 ("history", "سجل الجلسات الأخيرة"),
                 ("done", "إنهاء إدخال المهام"),
@@ -1613,10 +1845,15 @@ def build_application(bot: StudyBot) -> Application:
             logger.warning("Could not update Telegram command menu", exc_info=True)
         await bot.restore_reminders(application)
         bot.cleanup_task = asyncio.create_task(bot.cleanup_state_loop(), name="state-cleanup")
+        bot.group_camp_loop_task = asyncio.create_task(
+            bot.group_camp_scheduler_loop(application), name="group-camp-scheduler"
+        )
 
     async def shutdown(application: Application) -> None:
         if bot.cleanup_task and not bot.cleanup_task.done():
             bot.cleanup_task.cancel()
+        if bot.group_camp_loop_task and not bot.group_camp_loop_task.done():
+            bot.group_camp_loop_task.cancel()
         for task in (*bot.reminder_tasks.values(), *bot.timer_tasks.values()):
             if not task.done():
                 task.cancel()
@@ -1638,6 +1875,9 @@ def build_application(bot: StudyBot) -> Application:
     )
     application.add_handler(CommandHandler("start", bot.start))
     application.add_handler(CommandHandler("study", bot.study))
+    application.add_handler(CommandHandler(["camp", "group_session"], bot.camp))
+    application.add_handler(CommandHandler("camps", bot.camps))
+    application.add_handler(CommandHandler("cancel_camp", bot.cancel_camp))
     application.add_handler(CommandHandler("menu", bot.study))
     application.add_handler(CommandHandler("templates", bot.study))
     application.add_handler(CommandHandler("cancel", bot.cancel))
@@ -1646,6 +1886,8 @@ def build_application(bot: StudyBot) -> Application:
     application.add_handler(CommandHandler("help", bot.help))
     application.add_handler(CommandHandler("admin", bot.admin))
     application.add_handler(CommandHandler("done", bot.done))
+    application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & filters.COMMAND, bot.camp))
+    application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & filters.TEXT & ~filters.COMMAND, bot.text))
     application.add_handler(CallbackQueryHandler(bot.callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.text))
     application.add_error_handler(handle_error)
