@@ -27,6 +27,20 @@ from telegram.ext import (
 
 from config import Settings, load_settings
 from group_sessions import GroupCamp, normalize_camp_value, render_group_camp
+from keyboards import (
+    admin_keyboard as _admin_keyboard,
+    categories_keyboard as _categories_keyboard,
+    completed_tasks_keyboard as _completed_tasks_keyboard,
+    duration_keyboard as _duration_keyboard,
+    final_keyboard as _final_keyboard,
+    group_camp_keyboard as _group_camp_keyboard,
+    rating_keyboard as _rating_keyboard,
+    subscription_keyboard as _subscription_keyboard,
+    task_keyboard as _task_keyboard,
+    template_nav_keyboard as _template_nav_keyboard,
+    time_choice_keyboard as _time_choice_keyboard,
+    timer_keyboard as _timer_keyboard,
+)
 from storage import Store, reset_flow
 from templates import CATEGORIES, CATEGORY_BY_ID, TEMPLATE_BY_ID, TEMPLATES, preview, random_dua, render_card
 from utils import (
@@ -148,141 +162,19 @@ class StudyBot:
         except asyncio.CancelledError:
             return
 
-    # ---------- Menus ----------
-    @staticmethod
-    @lru_cache(maxsize=1)
-    def categories_keyboard() -> InlineKeyboardMarkup:
-        rows: list[list[InlineKeyboardButton]] = []
-        for index in range(0, len(CATEGORIES), 2):
-            row = [
-                InlineKeyboardButton(category[1], callback_data=f"cat:{category[0]}")
-                for category in CATEGORIES[index:index + 2]
-            ]
-            rows.append(row)
-        rows.append([InlineKeyboardButton("🎲 تصميم عشوائي", callback_data="random")])
-        rows.append([
-            InlineKeyboardButton("📊 إحصائياتي", callback_data="stats"),
-            InlineKeyboardButton("🕘 سجل الجلسات", callback_data="history"),
-        ])
-        return InlineKeyboardMarkup(rows)
-
-    @staticmethod
-    @lru_cache(maxsize=128)
-    def template_nav_keyboard(category_id: int, template_id: int) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("◀️ السابق", callback_data=f"nav:{category_id}:prev"),
-                InlineKeyboardButton("✅ اختيار هذا التصميم", callback_data=f"pick:{template_id}"),
-                InlineKeyboardButton("التالي ▶️", callback_data=f"nav:{category_id}:next"),
-            ],
-            [
-                InlineKeyboardButton("🔙 الأقسام", callback_data="start"),
-                InlineKeyboardButton("🎲 تصميم عشوائي", callback_data="random"),
-            ],
-        ])
-
-    @staticmethod
-    @lru_cache(maxsize=1)
-    def time_choice_keyboard() -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚡ الآن فورًا", callback_data="time:now")],
-            [
-                InlineKeyboardButton("🔄 تصميم مختلف", callback_data="start"),
-                InlineKeyboardButton("❌ إلغاء", callback_data="cancel_flow"),
-            ],
-        ])
-
-    @staticmethod
-    @lru_cache(maxsize=1)
-    def duration_keyboard() -> InlineKeyboardMarkup:
-        # Grouped by rough length (short / medium / long) instead of a flat
-        # chronological list, so the choices read as related clusters rather
-        # than an arbitrary row of numbers.
-        short = (15, 30, 45)
-        medium = (60, 90, 120)
-        long_ = (150, 180, 240)
-        rows = [
-            [InlineKeyboardButton(duration_label(m), callback_data=f"dur:{m}") for m in group]
-            for group in (short, medium, long_)
-        ]
-        rows.append([
-            InlineKeyboardButton("◀️ رجوع", callback_data="back_to_time"),
-            InlineKeyboardButton("❌ إلغاء", callback_data="cancel_flow"),
-        ])
-        return InlineKeyboardMarkup(rows)
-
-    @staticmethod
-    @lru_cache(maxsize=2)
-    def task_keyboard(has_tasks: bool) -> InlineKeyboardMarkup:
-        rows = [[InlineKeyboardButton("✅ انتهيت من إضافة المهام", callback_data="finalize")]]
-        second_row = []
-        if has_tasks:
-            second_row.append(InlineKeyboardButton("↩️ حذف آخر مهمة", callback_data="del_last"))
-        second_row.append(InlineKeyboardButton("❌ إلغاء الجلسة", callback_data="cancel_flow"))
-        rows.append(second_row)
-        return InlineKeyboardMarkup(rows)
-
-    @staticmethod
-    @lru_cache(maxsize=1)
-    def final_keyboard() -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📝 جلسة جديدة", callback_data="new")],
-            [
-                InlineKeyboardButton("📊 إحصائياتي", callback_data="stats"),
-                InlineKeyboardButton("🕘 سجل الجلسات", callback_data="history"),
-            ],
-        ])
-
-    @staticmethod
-    def timer_keyboard(share_url: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 مشاركة المؤقت", url=share_url)],
-            *StudyBot.final_keyboard().inline_keyboard,
-        ])
-
-    @staticmethod
-    def completed_tasks_keyboard(total: int) -> InlineKeyboardMarkup:
-        total = max(1, min(int(total), 20))
-        values = list(range(0, total + 1))
-        rows = []
-        for index in range(0, len(values), 5):
-            rows.append([
-                InlineKeyboardButton(f"{value}/{total}", callback_data=f"done_count:{value}")
-                for value in values[index:index + 5]
-            ])
-        return InlineKeyboardMarkup(rows)
-
-    @staticmethod
-    @lru_cache(maxsize=1)
-    def rating_keyboard() -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton(str(value), callback_data=f"rate:{value}") for value in range(1, 6)],
-            [InlineKeyboardButton(str(value), callback_data=f"rate:{value}") for value in range(6, 11)],
-        ])
-
-    @staticmethod
-    @lru_cache(maxsize=1)
-    def admin_keyboard() -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🟢 حالة البوت", callback_data="admin:status"), InlineKeyboardButton("📊 الإحصائيات", callback_data="admin:stats")],
-            [InlineKeyboardButton("👥 كل الأعضاء", callback_data="admin:users"), InlineKeyboardButton("🆕 أعضاء جدد", callback_data="admin:new_users")],
-            [InlineKeyboardButton("🔎 بحث عن عضو", callback_data="admin:lookup"), InlineKeyboardButton("🧾 السجلات", callback_data="admin:logs")],
-            [InlineKeyboardButton("🚫 حظر عضو", callback_data="admin:block"), InlineKeyboardButton("✅ فك الحظر", callback_data="admin:unblock")],
-            [InlineKeyboardButton("📢 إذاعة رسالة", callback_data="admin:broadcast"), InlineKeyboardButton("⏹ إيقاف الإذاعة", callback_data="admin:broadcast_cancel")],
-            [InlineKeyboardButton("🔒 الاشتراك الإجباري", callback_data="admin:subscription")],
-        ])
-
-    @staticmethod
-    def subscription_keyboard(channels: tuple[str, ...]) -> InlineKeyboardMarkup:
-        rows = [[InlineKeyboardButton(f"📢 اشترك في {channel}", url=f"https://t.me/{channel.lstrip('@')}")] for channel in channels]
-        rows.append([InlineKeyboardButton("✅ تحقّق من الاشتراك", callback_data="subscription:check")])
-        return InlineKeyboardMarkup(rows)
-
-    @staticmethod
-    def group_camp_keyboard(camp_id: int, participants: int = 0) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([[
-            InlineKeyboardButton(f"🙋‍♂️ انضم للمعسكر ({participants})", callback_data=f"camp:join:{camp_id}"),
-        ]])
+    # Keyboard layout and button styles are kept separate from update logic.
+    categories_keyboard = staticmethod(_categories_keyboard)
+    template_nav_keyboard = staticmethod(_template_nav_keyboard)
+    time_choice_keyboard = staticmethod(_time_choice_keyboard)
+    duration_keyboard = staticmethod(_duration_keyboard)
+    task_keyboard = staticmethod(_task_keyboard)
+    final_keyboard = staticmethod(_final_keyboard)
+    timer_keyboard = staticmethod(_timer_keyboard)
+    completed_tasks_keyboard = staticmethod(_completed_tasks_keyboard)
+    rating_keyboard = staticmethod(_rating_keyboard)
+    admin_keyboard = staticmethod(_admin_keyboard)
+    subscription_keyboard = staticmethod(_subscription_keyboard)
+    group_camp_keyboard = staticmethod(_group_camp_keyboard)
 
     def is_owner(self, user_id: int | None) -> bool:
         return bool(user_id is not None and user_id in self.settings.owner_ids)
@@ -619,7 +511,7 @@ class StudyBot:
             "⏳ <b>مؤقت جلسة مذاكرة مشتركة</b>\n\n"
             f"{status}\n\n<i>يمكنك فتح الرابط مرة أخرى لمعرفة الوقت المتبقي.</i>",
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 ابدأ جلستك", callback_data="start")]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 ابدأ جلستك", callback_data="start", style="success")]]),
         )
 
     # ---------- Commands ----------
@@ -659,10 +551,10 @@ class StudyBot:
                 f"📅 أنجزت اليوم: <b>{today_sessions} جلسة</b>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📝 ابدأ جلسة مذاكرة", callback_data="start")],
+                    [InlineKeyboardButton("📝 ابدأ جلسة مذاكرة", callback_data="start", style="success")],
                     [
-                        InlineKeyboardButton("📊 إحصائياتي", callback_data="stats"),
-                        InlineKeyboardButton("❓ مساعدة", callback_data="help"),
+                        InlineKeyboardButton("📊 إحصائياتي", callback_data="stats", style="primary"),
+                        InlineKeyboardButton("❓ مساعدة", callback_data="help", style="primary"),
                     ],
                 ]),
             )
@@ -830,7 +722,7 @@ class StudyBot:
                 await update.message.reply_text(
                     notice,
                     parse_mode=ParseMode.HTML,
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 جلسة جديدة", callback_data="start")]]),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 جلسة جديدة", callback_data="start", style="success")]]),
                 )
 
     async def done(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -863,7 +755,7 @@ class StudyBot:
         if not rows:
             await message.reply_text(
                 "🕘 لا يوجد سجل جلسات حتى الآن.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 ابدأ أول جلسة", callback_data="start")]]),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 ابدأ أول جلسة", callback_data="start", style="success")]]),
             )
             return
         lines = ["🕘 <b>آخر جلساتك</b>", ""]
@@ -885,7 +777,7 @@ class StudyBot:
             "5️⃣ اضغط انتهيت أو أرسل /done\n\n"
             "<b>الأوامر:</b> /study /menu /templates /done /cancel /stats /history /help",
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 ابدأ جلسة", callback_data="start")]]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 ابدأ جلسة", callback_data="start", style="success")]]),
         )
 
     # ---------- Owner administration ----------
@@ -1043,9 +935,9 @@ class StudyBot:
             "اكتب القنوات مفصولة بفواصل، مثل: <code>@channel_one,@channel_two</code>.",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✏️ تغيير القنوات", callback_data="admin:sub_set")],
-                [InlineKeyboardButton("🗑 إيقاف الاشتراك الإجباري", callback_data="admin:sub_off")],
-                [InlineKeyboardButton("🔙 لوحة الأدمن", callback_data="admin:back")],
+                [InlineKeyboardButton("✏️ تغيير القنوات", callback_data="admin:sub_set", style="primary")],
+                [InlineKeyboardButton("🗑 إيقاف الاشتراك الإجباري", callback_data="admin:sub_off", style="danger")],
+                [InlineKeyboardButton("🔙 لوحة الأدمن", callback_data="admin:back", style="primary")],
             ]),
         )
 
@@ -1363,7 +1255,7 @@ class StudyBot:
             await query.message.reply_text(
                 "✅ <b>تم إلغاء الجلسة الحالية.</b>",
                 parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 جلسة جديدة", callback_data="start")]]),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📝 جلسة جديدة", callback_data="start", style="success")]]),
             )
             return
 

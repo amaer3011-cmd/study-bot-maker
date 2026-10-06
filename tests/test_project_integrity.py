@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import time
 from types import SimpleNamespace
@@ -46,9 +47,14 @@ def test_user_asset_manifest_is_complete() -> None:
     records = json.loads(manifest.read_text(encoding="utf-8"))
     user_assets = sorted((ROOT / "assets" / "user_images").glob("user_*.jpg"))
     assert len(records) == len(user_assets)
-    assert len(records) >= 59
+    indexes = sorted(int(path.stem.split("_")[1]) for path in user_assets)
+    assert indexes == list(range(1, len(user_assets) + 1))
+    assert len({record["sha256"] for record in records}) == len(records)
     missing = [record["asset"] for record in records if not (ROOT / record["asset"]).is_file()]
     assert not missing, f"Missing user assets: {missing[:5]} (total={len(missing)})"
+    for record in records:
+        asset = ROOT / record["asset"]
+        assert hashlib.sha256(asset.read_bytes()).hexdigest() == record["sha256"]
 
 
 def test_motivation_video_library_is_present() -> None:
@@ -75,11 +81,12 @@ def test_motivation_manifest_records_are_unique_and_traceable() -> None:
     assert len(assets) == len(set(assets))
     assert len(hashes) == len(set(hashes))
     for record in records:
-        assert (ROOT / record["asset"]).is_file()
+        asset = ROOT / record["asset"]
+        assert asset.is_file()
         assert record["video_codec"] == "h264"
-    external = [record for record in records if record.get("source_type") == "Mixkit stock video"]
-    assert len(external) >= 5
-    assert all(record.get("source_url") and record.get("license_url") for record in external)
+        assert hashlib.sha256(asset.read_bytes()).hexdigest() == record["sha256"]
+    attributed = [record for record in records if record.get("source_type")]
+    assert all(record.get("source_url") and record.get("license_url") for record in attributed)
 
 
 def test_motivation_video_send_and_media_cache(tmp_path: Path) -> None:

@@ -31,7 +31,7 @@ class Settings:
     update_concurrency: int = 8
     connection_pool_size: int = 16
     pool_timeout_seconds: float = 5.0
-    timer_update_interval_seconds: float = 1.0
+    timer_update_interval_seconds: float = 10.0
     owner_ids: tuple[int, ...] = ()
     force_subscription_channels: tuple[str, ...] = ()
     motivation_videos_enabled: bool = True
@@ -99,7 +99,7 @@ def load_settings() -> Settings:
     update_concurrency = _positive_int("UPDATE_CONCURRENCY", 8, 32)
     connection_pool_size = _positive_int("CONNECTION_POOL_SIZE", 16, 64)
     pool_timeout_seconds = _positive_float("POOL_TIMEOUT_SECONDS", 5.0, 1.0, 30.0)
-    timer_update_interval_seconds = _positive_float("TIMER_UPDATE_SECONDS", 1.0, 0.5, 60.0)
+    timer_update_interval_seconds = _positive_float("TIMER_UPDATE_SECONDS", 10.0, 1.0, 60.0)
     owner_ids = _csv_int("OWNER_IDS")
     if not owner_ids and os.getenv("OWNER_ID", "").strip():
         owner_ids = _csv_int("OWNER_ID")
